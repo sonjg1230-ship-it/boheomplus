@@ -1,0 +1,6 @@
+{
+  "name": "단기납 자산케어 분석 대시보드",
+  "description": "5년·7년 단기납 종신 자산관리 환급률, 비과세 절세 효과, 고객 세그먼트 및 상담 파이프라인을 심층 분석하는 프레스티지 금융 대시보드",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

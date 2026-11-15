@@ -1,0 +1,153 @@
+{
+  "entities": {
+    "Consultation": {
+      "title": "Consultation",
+      "description": "고객이 신청한 단기납 자산케어 무료 상담 내역 (개인정보 포함, 관리자 전용 열람)",
+      "type": "object",
+      "properties": {
+        "regCode": {
+          "type": "string",
+          "description": "접수 고유 번호",
+          "minLength": 6,
+          "maxLength": 20,
+          "pattern": "^PC-[0-9]{4}-[0-9]{4}$"
+        },
+        "name": {
+          "type": "string",
+          "description": "신청 고객 성함",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "phone": {
+          "type": "string",
+          "description": "신청 고객 연락처",
+          "minLength": 9,
+          "maxLength": 20,
+          "pattern": "^[0-9-]+$"
+        },
+        "birthDate": {
+          "type": "string",
+          "description": "생년월일 6자리",
+          "minLength": 6,
+          "maxLength": 6,
+          "pattern": "^[0-9]{6}$"
+        },
+        "gender": {
+          "type": "string",
+          "description": "성별",
+          "enum": ["male", "female"]
+        },
+        "region": {
+          "type": "string",
+          "description": "거주 지역",
+          "minLength": 2,
+          "maxLength": 40
+        },
+        "period": {
+          "type": "number",
+          "description": "희망 납입 기간(년)",
+          "enum": [5, 7, 10]
+        },
+        "monthlyAmount": {
+          "type": "number",
+          "description": "희망 월 납입금액(만원)",
+          "enum": [10, 30, 50, 100, 150, 200]
+        },
+        "tenYearValue": {
+          "type": "number",
+          "description": "10년 시점 예상 환급금(만원)"
+        },
+        "status": {
+          "type": "string",
+          "description": "상담 진행 상태",
+          "enum": ["접수대기", "상담배정", "상담완료", "보류"]
+        },
+        "memo": {
+          "type": "string",
+          "description": "관리자 상담 메모",
+          "maxLength": 300
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "접수 일시 (서버 타임스탬프)"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "상태 변경 일시 (서버 타임스탬프)"
+        }
+      },
+      "required": [
+        "regCode",
+        "name",
+        "phone",
+        "birthDate",
+        "gender",
+        "region",
+        "period",
+        "monthlyAmount",
+        "tenYearValue",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "PublicFeedItem": {
+      "title": "PublicFeedItem",
+      "description": "랜딩 페이지 실시간 접수 티커용 마스킹된 비식별 현황 레코드",
+      "type": "object",
+      "properties": {
+        "maskedName": {
+          "type": "string",
+          "description": "마스킹된 성함 (예: 홍*동)",
+          "minLength": 1,
+          "maxLength": 20
+        },
+        "regionLabel": {
+          "type": "string",
+          "description": "지역명",
+          "minLength": 2,
+          "maxLength": 40
+        },
+        "period": {
+          "type": "number",
+          "description": "희망 납입 기간(년)",
+          "enum": [5, 7, 10]
+        },
+        "monthlyAmount": {
+          "type": "number",
+          "description": "희망 월 납입금액(만원)",
+          "enum": [10, 30, 50, 100, 150, 200]
+        },
+        "tenYearValue": {
+          "type": "number",
+          "description": "10년 시점 예상 환급금(만원)"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "접수 일시 (서버 타임스탬프)"
+        }
+      },
+      "required": [
+        "maskedName",
+        "regionLabel",
+        "period",
+        "monthlyAmount",
+        "tenYearValue",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/consultations/{consultationId}": {
+      "schema": { "$ref": "#/entities/Consultation" },
+      "description": "상담 신청 상세 내역 (PII 포함, 공개 생성 전용 및 관리자 전용 조회/수정/삭제)"
+    },
+    "/public_feed/{feedId}": {
+      "schema": { "$ref": "#/entities/PublicFeedItem" },
+      "description": "실시간 접수 현황 티커용 비식별 피드"
+    }
+  }
+}

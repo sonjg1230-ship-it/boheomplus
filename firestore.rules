@@ -1,0 +1,108 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn()
+        && request.auth.token.email_verified == true
+        && request.auth.token.email == 'sonjg1230@gmail.com';
+    }
+
+    function isValidConsultationFields(data) {
+      return data.keys().hasAll([
+        'regCode', 'name', 'phone', 'birthDate', 'gender',
+        'region', 'period', 'monthlyAmount', 'tenYearValue',
+        'status', 'createdAt', 'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'regCode', 'name', 'phone', 'birthDate', 'gender',
+        'region', 'period', 'monthlyAmount', 'tenYearValue',
+        'status', 'memo', 'createdAt', 'updatedAt'
+      ])
+      && data.regCode is string && data.regCode.size() >= 6 && data.regCode.size() <= 20 && data.regCode.matches('^PC-[0-9]{4}-[0-9]{4}$')
+      && data.name is string && data.name.size() >= 1 && data.name.size() <= 40
+      && data.phone is string && data.phone.size() >= 9 && data.phone.size() <= 20 && data.phone.matches('^[0-9-]+$')
+      && data.birthDate is string && data.birthDate.size() == 6 && data.birthDate.matches('^[0-9]{6}$')
+      && data.gender is string && data.gender in ['male', 'female']
+      && data.region is string && data.region.size() >= 2 && data.region.size() <= 40
+      && data.period is number && data.period in [5, 7, 10]
+      && data.monthlyAmount is number && data.monthlyAmount in [10, 30, 50, 100, 150, 200]
+      && data.tenYearValue is number && data.tenYearValue > 0 && data.tenYearValue <= 1000000
+      && data.status is string && data.status in ['접수대기', '상담배정', '상담완료', '보류']
+      && (!('memo' in data) || (data.memo is string && data.memo.size() <= 300))
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidPublicFeed(data) {
+      return data.keys().hasAll([
+        'maskedName', 'regionLabel', 'period', 'monthlyAmount', 'tenYearValue', 'createdAt'
+      ])
+      && data.keys().hasOnly([
+        'maskedName', 'regionLabel', 'period', 'monthlyAmount', 'tenYearValue', 'createdAt'
+      ])
+      && data.maskedName is string && data.maskedName.size() >= 1 && data.maskedName.size() <= 20
+      && data.regionLabel is string && data.regionLabel.size() >= 2 && data.regionLabel.size() <= 40
+      && data.period is number && data.period in [5, 7, 10]
+      && data.monthlyAmount is number && data.monthlyAmount in [10, 30, 50, 100, 150, 200]
+      && data.tenYearValue is number && data.tenYearValue > 0 && data.tenYearValue <= 1000000
+      && data.createdAt is timestamp;
+    }
+
+    // Consultations (PII isolated: public create only, admin read/update/delete)
+    match /consultations/{consultationId} {
+      allow get: if isValidId(consultationId) && isAdmin();
+      allow list: if isAdmin();
+
+      allow create: if isValidId(consultationId)
+        && isValidConsultationFields(incoming())
+        && incoming().status == '접수대기'
+        && !('memo' in incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isValidId(consultationId)
+        && isAdmin()
+        && isValidConsultationFields(incoming())
+        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'memo', 'updatedAt'])
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (existing().status != '상담완료' || isAdmin());
+
+      allow delete: if isValidId(consultationId) && isAdmin();
+    }
+
+    // Non-PII masked public feed for live ticker
+    match /public_feed/{feedId} {
+      allow get: if isValidId(feedId);
+      allow list: if request.query.limit != null && request.query.limit <= 50;
+
+      allow create: if isValidId(feedId)
+        && isValidPublicFeed(incoming())
+        && incoming().createdAt == request.time;
+
+      allow update: if false;
+      allow delete: if isValidId(feedId) && isAdmin();
+    }
+  }
+}
