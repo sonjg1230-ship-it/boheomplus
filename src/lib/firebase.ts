@@ -13,16 +13,25 @@ import {
   deleteDoc,
   doc,
   getDocFromServer,
+  getDocs,
   getFirestore,
   limit,
   onSnapshot,
   orderBy,
   query,
   serverTimestamp,
+  setDoc,
   updateDoc,
   writeBatch,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
+import {
+  ImportedVaultKeys,
+  decryptVaultPayload,
+  encryptVaultPayload,
+  signVaultEvent,
+  verifyVaultEvent,
+} from './vaultCrypto';
 
 export const ADMIN_EMAIL = 'sonjg1230@gmail.com';
 
@@ -238,8 +247,18 @@ export async function submitConsultationLead(input: SubmitConsultationInput): Pr
   const maskedName = maskKoreanName(clean.name);
 
   try {
+    const encryptedLead = await encryptVaultPayload({
+      name: clean.name,
+      phone: clean.phone,
+      birthDate: clean.birthDate,
+      gender: clean.gender,
+      region: clean.region,
+      memo: '',
+    });
+
     const batch = writeBatch(db);
     const consultationRef = doc(db, 'consultations', docId);
+    const vaultRef = doc(db, 'vault_consultations', docId);
     const feedRef = doc(db, 'public_feed', docId);
 
     batch.set(consultationRef, {
@@ -257,6 +276,17 @@ export async function submitConsultationLead(input: SubmitConsultationInput): Pr
       updatedAt: serverTimestamp(),
     });
 
+    batch.set(vaultRef, {
+      regCode,
+      period: clean.period,
+      monthlyAmount: clean.monthlyAmount,
+      tenYearValue: clean.tenYearValue,
+      encData: encryptedLead.encData,
+      wrappedKey: encryptedLead.wrappedKey,
+      iv: encryptedLead.iv,
+      createdAt: serverTimestamp(),
+    });
+
     batch.set(feedRef, {
       maskedName,
       regionLabel: clean.region,
@@ -268,7 +298,7 @@ export async function submitConsultationLead(input: SubmitConsultationInput): Pr
 
     await batch.commit();
 
-    // Also persist to backend store so password-only admin access works without Google OAuth
+    // Best-effort sync to Express store when running with backend server
     try {
       await fetch('/api/consultations', {
         method: 'POST',
@@ -287,12 +317,165 @@ export async function submitConsultationLead(input: SubmitConsultationInput): Pr
         }),
       });
     } catch {
-      // Keep primary Firestore write succeeded
+      // Ignore if running on static hosting without /api
     }
 
     return { docId, regCode, maskedName };
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `consultations/${docId}`);
+  }
+}
+
+interface DecryptedVaultLeadPayload {
+  name: string;
+  phone: string;
+  birthDate: string;
+  gender: 'male' | 'female';
+  region: string;
+  memo?: string;
+}
+
+interface DecryptedVaultEventPayload {
+  action: 'update' | 'delete';
+  status?: ConsultationStatus;
+  memo?: string;
+  updatedAt?: string;
+}
+
+export async function fetchVaultConsultations(
+  keys: ImportedVaultKeys
+): Promise<ConsultationRecord[]> {
+  try {
+    const vaultQuery = query(
+      collection(db, 'vault_consultations'),
+      orderBy('createdAt', 'desc'),
+      limit(200)
+    );
+    const eventQuery = query(
+      collection(db, 'consultation_events'),
+      orderBy('createdAt', 'asc'),
+      limit(500)
+    );
+
+    const [vaultSnap, eventSnap] = await Promise.all([
+      getDocs(vaultQuery),
+      getDocs(eventQuery),
+    ]);
+
+    const recordMap = new Map<string, ConsultationRecord>();
+
+    for (const docSnap of vaultSnap.docs) {
+      const d = docSnap.data();
+      try {
+        const plain = await decryptVaultPayload<DecryptedVaultLeadPayload>(
+          keys.rsaPrivateKey,
+          String(d.encData ?? ''),
+          String(d.wrappedKey ?? ''),
+          String(d.iv ?? '')
+        );
+        const createdTs = d.createdAt instanceof Timestamp ? d.createdAt.toDate() : null;
+        recordMap.set(docSnap.id, {
+          id: docSnap.id,
+          regCode: String(d.regCode ?? ''),
+          name: String(plain.name ?? ''),
+          phone: String(plain.phone ?? ''),
+          birthDate: String(plain.birthDate ?? ''),
+          gender: plain.gender === 'female' ? 'female' : 'male',
+          region: String(plain.region ?? ''),
+          period: (Number(d.period) || 5) as 5 | 7 | 10,
+          monthlyAmount: (Number(d.monthlyAmount) || 50) as 10 | 30 | 50 | 100 | 150 | 200,
+          tenYearValue: Number(d.tenYearValue) || 0,
+          status: '접수대기',
+          memo: typeof plain.memo === 'string' ? plain.memo : '',
+          createdAt: createdTs,
+          updatedAt: createdTs,
+        });
+      } catch {
+        // Skip unreadable/corrupted vault entry
+      }
+    }
+
+    for (const evSnap of eventSnap.docs) {
+      const d = evSnap.data();
+      const targetId = String(d.targetId ?? '');
+      const encData = String(d.encData ?? '');
+      const wrappedKey = String(d.wrappedKey ?? '');
+      const iv = String(d.iv ?? '');
+      const signature = String(d.signature ?? '');
+
+      const isValidSig = await verifyVaultEvent(targetId, encData, wrappedKey, iv, signature);
+      if (!isValidSig) continue;
+
+      try {
+        const ev = await decryptVaultPayload<DecryptedVaultEventPayload>(
+          keys.rsaPrivateKey,
+          encData,
+          wrappedKey,
+          iv
+        );
+        if (ev.action === 'delete') {
+          recordMap.delete(targetId);
+        } else if (ev.action === 'update') {
+          const existing = recordMap.get(targetId);
+          if (existing) {
+            const evTs = d.createdAt instanceof Timestamp ? d.createdAt.toDate() : existing.updatedAt;
+            recordMap.set(targetId, {
+              ...existing,
+              status:
+                ev.status && ALLOWED_STATUSES.includes(ev.status) ? ev.status : existing.status,
+              memo: typeof ev.memo === 'string' ? ev.memo : existing.memo,
+              updatedAt: evTs,
+            });
+          }
+        }
+      } catch {
+        // Ignore malformed event
+      }
+    }
+
+    return Array.from(recordMap.values()).sort(
+      (a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0)
+    );
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, 'vault_consultations');
+  }
+}
+
+export async function writeVaultConsultationEvent(
+  keys: ImportedVaultKeys,
+  targetId: string,
+  action: 'update' | 'delete',
+  status?: ConsultationStatus,
+  memo?: string
+): Promise<void> {
+  const eventId = `ev-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const path = `consultation_events/${eventId}`;
+
+  try {
+    const encrypted = await encryptVaultPayload({
+      action,
+      status,
+      memo: typeof memo === 'string' ? memo.trim().slice(0, 300) : '',
+      updatedAt: new Date().toISOString(),
+    });
+    const signature = await signVaultEvent(
+      keys.ecdsaPrivateKey,
+      targetId,
+      encrypted.encData,
+      encrypted.wrappedKey,
+      encrypted.iv
+    );
+
+    await setDoc(doc(db, 'consultation_events', eventId), {
+      targetId,
+      encData: encrypted.encData,
+      wrappedKey: encrypted.wrappedKey,
+      iv: encrypted.iv,
+      signature,
+      createdAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
   }
 }
 

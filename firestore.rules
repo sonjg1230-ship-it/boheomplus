@@ -54,6 +54,40 @@ service cloud.firestore {
       && data.updatedAt is timestamp;
     }
 
+    function isValidVaultConsultation(data) {
+      return data.keys().hasAll([
+        'regCode', 'period', 'monthlyAmount', 'tenYearValue',
+        'encData', 'wrappedKey', 'iv', 'createdAt'
+      ])
+      && data.keys().hasOnly([
+        'regCode', 'period', 'monthlyAmount', 'tenYearValue',
+        'encData', 'wrappedKey', 'iv', 'createdAt'
+      ])
+      && data.regCode is string && data.regCode.size() >= 6 && data.regCode.size() <= 20 && data.regCode.matches('^PC-[0-9]{4}-[0-9]{4}$')
+      && data.period is number && data.period in [5, 7, 10]
+      && data.monthlyAmount is number && data.monthlyAmount in [10, 30, 50, 100, 150, 200]
+      && data.tenYearValue is number && data.tenYearValue > 0 && data.tenYearValue <= 1000000
+      && data.encData is string && data.encData.size() >= 16 && data.encData.size() <= 4096
+      && data.wrappedKey is string && data.wrappedKey.size() >= 16 && data.wrappedKey.size() <= 1024
+      && data.iv is string && data.iv.size() >= 8 && data.iv.size() <= 64
+      && data.createdAt is timestamp;
+    }
+
+    function isValidConsultationEvent(data) {
+      return data.keys().hasAll([
+        'targetId', 'encData', 'wrappedKey', 'iv', 'signature', 'createdAt'
+      ])
+      && data.keys().hasOnly([
+        'targetId', 'encData', 'wrappedKey', 'iv', 'signature', 'createdAt'
+      ])
+      && isValidId(data.targetId)
+      && data.encData is string && data.encData.size() >= 16 && data.encData.size() <= 4096
+      && data.wrappedKey is string && data.wrappedKey.size() >= 16 && data.wrappedKey.size() <= 1024
+      && data.iv is string && data.iv.size() >= 8 && data.iv.size() <= 64
+      && data.signature is string && data.signature.size() >= 16 && data.signature.size() <= 512
+      && data.createdAt is timestamp;
+    }
+
     function isValidPublicFeed(data) {
       return data.keys().hasAll([
         'maskedName', 'regionLabel', 'period', 'monthlyAmount', 'tenYearValue', 'createdAt'
@@ -90,6 +124,32 @@ service cloud.firestore {
         && (existing().status != '상담완료' || isAdmin());
 
       allow delete: if isValidId(consultationId) && isAdmin();
+    }
+
+    // End-to-end encrypted consultations (zero plaintext PII; immutable create-only)
+    match /vault_consultations/{vaultId} {
+      allow get: if isValidId(vaultId);
+      allow list: if request.query.limit != null && request.query.limit <= 200;
+
+      allow create: if isValidId(vaultId)
+        && isValidVaultConsultation(incoming())
+        && incoming().createdAt == request.time;
+
+      allow update: if false;
+      allow delete: if isValidId(vaultId) && isAdmin();
+    }
+
+    // ECDSA P-256 signed & encrypted admin status/memo/delete events (append-only)
+    match /consultation_events/{eventId} {
+      allow get: if isValidId(eventId);
+      allow list: if request.query.limit != null && request.query.limit <= 500;
+
+      allow create: if isValidId(eventId)
+        && isValidConsultationEvent(incoming())
+        && incoming().createdAt == request.time;
+
+      allow update: if false;
+      allow delete: if isValidId(eventId) && isAdmin();
     }
 
     // Non-PII masked public feed for live ticker

@@ -93,6 +93,118 @@
         "updatedAt"
       ]
     },
+    "VaultConsultation": {
+      "title": "VaultConsultation",
+      "description": "종단간 암호화(RSA-OAEP-256 + AES-256-GCM)된 상담 신청 레코드 (평문 개인정보 미포함, 관리자 비밀번호 키로만 복호화)",
+      "type": "object",
+      "properties": {
+        "regCode": {
+          "type": "string",
+          "description": "접수 고유 번호",
+          "minLength": 6,
+          "maxLength": 20,
+          "pattern": "^PC-[0-9]{4}-[0-9]{4}$"
+        },
+        "period": {
+          "type": "number",
+          "description": "희망 납입 기간(년)",
+          "enum": [5, 7, 10]
+        },
+        "monthlyAmount": {
+          "type": "number",
+          "description": "희망 월 납입금액(만원)",
+          "enum": [10, 30, 50, 100, 150, 200]
+        },
+        "tenYearValue": {
+          "type": "number",
+          "description": "10년 시점 예상 환급금(만원)"
+        },
+        "encData": {
+          "type": "string",
+          "description": "AES-256-GCM 암호화된 고객 PII 페이로드 (Base64)",
+          "minLength": 16,
+          "maxLength": 4096
+        },
+        "wrappedKey": {
+          "type": "string",
+          "description": "RSA-OAEP-256으로 래핑된 AES 키 (Base64)",
+          "minLength": 16,
+          "maxLength": 1024
+        },
+        "iv": {
+          "type": "string",
+          "description": "AES-GCM 초기화 벡터 (Base64)",
+          "minLength": 8,
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "접수 일시 (서버 타임스탬프)"
+        }
+      },
+      "required": [
+        "regCode",
+        "period",
+        "monthlyAmount",
+        "tenYearValue",
+        "encData",
+        "wrappedKey",
+        "iv",
+        "createdAt"
+      ]
+    },
+    "ConsultationEvent": {
+      "title": "ConsultationEvent",
+      "description": "ECDSA P-256 전자서명 및 암호화된 관리자 상태/메모/삭제 이벤트 로그",
+      "type": "object",
+      "properties": {
+        "targetId": {
+          "type": "string",
+          "description": "대상 상담 문서 ID",
+          "minLength": 3,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "encData": {
+          "type": "string",
+          "description": "AES-256-GCM 암호화된 상태 변경 내역 (Base64)",
+          "minLength": 16,
+          "maxLength": 4096
+        },
+        "wrappedKey": {
+          "type": "string",
+          "description": "RSA-OAEP-256으로 래핑된 AES 키 (Base64)",
+          "minLength": 16,
+          "maxLength": 1024
+        },
+        "iv": {
+          "type": "string",
+          "description": "AES-GCM 초기화 벡터 (Base64)",
+          "minLength": 8,
+          "maxLength": 64
+        },
+        "signature": {
+          "type": "string",
+          "description": "관리자 ECDSA P-256 전자서명 (Base64)",
+          "minLength": 16,
+          "maxLength": 512
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "이벤트 기록 일시 (서버 타임스탬프)"
+        }
+      },
+      "required": [
+        "targetId",
+        "encData",
+        "wrappedKey",
+        "iv",
+        "signature",
+        "createdAt"
+      ]
+    },
     "PublicFeedItem": {
       "title": "PublicFeedItem",
       "description": "랜딩 페이지 실시간 접수 티커용 마스킹된 비식별 현황 레코드",
@@ -144,6 +256,14 @@
     "/consultations/{consultationId}": {
       "schema": { "$ref": "#/entities/Consultation" },
       "description": "상담 신청 상세 내역 (PII 포함, 공개 생성 전용 및 관리자 전용 조회/수정/삭제)"
+    },
+    "/vault_consultations/{vaultId}": {
+      "schema": { "$ref": "#/entities/VaultConsultation" },
+      "description": "종단간 암호화된 상담 내역 볼트 (평문 PII 없음, 관리자 비밀번호 키로 복호화)"
+    },
+    "/consultation_events/{eventId}": {
+      "schema": { "$ref": "#/entities/ConsultationEvent" },
+      "description": "ECDSA 서명된 상담 상태/메모/삭제 변경 이벤트"
     },
     "/public_feed/{feedId}": {
       "schema": { "$ref": "#/entities/PublicFeedItem" },

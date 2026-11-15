@@ -18,27 +18,29 @@ import {
 import {
   ConsultationRecord,
   ConsultationStatus,
+  auth,
   deleteConsultationRecord,
   exportConsultationsToCsv,
+  fetchVaultConsultations,
   formatKoreanDateTime,
   isVerifiedAdminUser,
   signInAdminWithGoogle,
   subscribeConsultations,
   updateConsultationRecord,
-  auth,
+  writeVaultConsultationEvent,
 } from '../lib/firebase';
 import {
   AdminLockStatus,
-  deleteServerConsultation,
-  fetchServerConsultations,
+  deleteServerConsultationOptional,
+  fetchServerConsultationsOptional,
   getAdminLockStatus,
-  getSavedAdminToken,
   loginAdminWithPassword,
   logoutAdminPasswordSession,
-  syncCloudRecordsToServer,
-  updateServerConsultation,
-  verifyAdminToken,
+  restoreVaultSession,
+  syncCloudRecordsToServerOptional,
+  updateServerConsultationOptional,
 } from '../lib/adminAuth';
+import { ImportedVaultKeys } from '../lib/vaultCrypto';
 import { formatKoreanMoney } from '../data/wealthData';
 
 interface AdminConsultationsModalProps {
@@ -72,7 +74,7 @@ function formatCountdown(totalSeconds: number): string {
 
 export function AdminConsultationsModal({ open, onClose }: AdminConsultationsModalProps) {
   const [authReady, setAuthReady] = useState(false);
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [vaultKeys, setVaultKeys] = useState<ImportedVaultKeys | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
   const [syncingCloud, setSyncingCloud] = useState(false);
 
@@ -91,6 +93,7 @@ export function AdminConsultationsModal({ open, onClose }: AdminConsultationsMod
   const [infoMsg, setInfoMsg] = useState<string | null>(null);
 
   const [records, setRecords] = useState<ConsultationRecord[]>([]);
+  const [extraLegacyRecords, setExtraLegacyRecords] = useState<ConsultationRecord[]>([]);
   const [loadingRecords, setLoadingRecords] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<'전체' | ConsultationStatus>('전체');
@@ -101,6 +104,8 @@ export function AdminConsultationsModal({ open, onClose }: AdminConsultationsMod
   const [savingId, setSavingId] = useState<string | null>(null);
   const [savedToastId, setSavedToastId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+
+  const isAuthenticated = Boolean(vaultKeys);
 
   const syncDraftsFromItems = useCallback((items: ConsultationRecord[]) => {
     setDraftStatus((prev) => {
@@ -119,26 +124,49 @@ export function AdminConsultationsModal({ open, onClose }: AdminConsultationsMod
     });
   }, []);
 
-  const loadRecords = useCallback(async () => {
-    setLoadingRecords(true);
-    try {
-      const items = await fetchServerConsultations();
-      setRecords(items);
-      syncDraftsFromItems(items);
-    } catch (err) {
-      if (err instanceof Error && err.message === 'SESSION_EXPIRED') {
-        setIsAuthenticated(false);
-        setErrorMsg('세션이 만료되었습니다. 관리자 비밀번호를 다시 입력해 주세요.');
-      } else {
-        const msg = err instanceof Error ? err.message : '데이터를 불러오지 못했습니다.';
-        setErrorMsg(msg);
-      }
-    } finally {
-      setLoadingRecords(false);
-    }
-  }, [syncDraftsFromItems]);
+  const loadRecords = useCallback(
+    async (keysToUse?: ImportedVaultKeys | null) => {
+      const activeKeys = keysToUse ?? vaultKeys;
+      if (!activeKeys) return;
 
-  // Initialize session & server lockout status whenever modal opens
+      setLoadingRecords(true);
+      try {
+        const [vaultItems, serverItems] = await Promise.all([
+          fetchVaultConsultations(activeKeys),
+          fetchServerConsultationsOptional(),
+        ]);
+
+        const mergedMap = new Map<string, ConsultationRecord>();
+        for (const item of serverItems) {
+          mergedMap.set(item.id, item);
+        }
+        for (const item of extraLegacyRecords) {
+          if (!mergedMap.has(item.id)) mergedMap.set(item.id, item);
+        }
+        for (const item of vaultItems) {
+          mergedMap.set(item.id, item);
+        }
+
+        const merged = Array.from(mergedMap.values()).sort(
+          (a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0)
+        );
+        setRecords(merged);
+        syncDraftsFromItems(merged);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : '상담 내역을 불러오지 못했습니다.';
+        setErrorMsg(
+          msg.startsWith('{')
+            ? '클라우드 DB 조회 권한을 확인하지 못했습니다. 잠시 후 다시 시도해 주세요.'
+            : msg
+        );
+      } finally {
+        setLoadingRecords(false);
+      }
+    },
+    [vaultKeys, extraLegacyRecords, syncDraftsFromItems]
+  );
+
+  // Initialize session & lockout status whenever modal opens
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
@@ -149,7 +177,7 @@ export function AdminConsultationsModal({ open, onClose }: AdminConsultationsMod
       setInfoMsg(null);
 
       try {
-        const [status, tokenOk] = await Promise.all([
+        const [status, restored] = await Promise.all([
           getAdminLockStatus().catch(
             (): AdminLockStatus => ({
               locked: false,
@@ -160,11 +188,11 @@ export function AdminConsultationsModal({ open, onClose }: AdminConsultationsMod
               remainingSeconds: 0,
             })
           ),
-          getSavedAdminToken() ? verifyAdminToken() : Promise.resolve(false),
+          restoreVaultSession(),
         ]);
         if (cancelled) return;
         setLockStatus(status);
-        setIsAuthenticated(tokenOk);
+        setVaultKeys(restored);
       } finally {
         if (!cancelled) {
           setAuthReady(true);
@@ -208,18 +236,18 @@ export function AdminConsultationsModal({ open, onClose }: AdminConsultationsMod
 
   // Load records & auto-refresh when authenticated
   useEffect(() => {
-    if (!open || !authReady || !isAuthenticated) {
-      if (!isAuthenticated) setRecords([]);
+    if (!open || !authReady || !vaultKeys) {
+      if (!vaultKeys) setRecords([]);
       return;
     }
 
-    void loadRecords();
+    void loadRecords(vaultKeys);
     const interval = window.setInterval(() => {
-      void loadRecords();
+      void loadRecords(vaultKeys);
     }, 15000);
 
     return () => window.clearInterval(interval);
-  }, [open, authReady, isAuthenticated, loadRecords]);
+  }, [open, authReady, vaultKeys, loadRecords]);
 
   const counts = useMemo(() => {
     return {
@@ -266,10 +294,10 @@ export function AdminConsultationsModal({ open, onClose }: AdminConsultationsMod
         remainingSeconds: result.remainingSeconds,
       });
 
-      if (result.ok) {
+      if (result.ok && result.vaultKeys) {
         setPassword('');
         setShowPassword(false);
-        setIsAuthenticated(true);
+        setVaultKeys(result.vaultKeys);
       } else {
         setPassword('');
         setErrorMsg(result.message || '비밀번호가 올바르지 않습니다.');
@@ -288,14 +316,14 @@ export function AdminConsultationsModal({ open, onClose }: AdminConsultationsMod
     setInfoMsg(null);
     try {
       await logoutAdminPasswordSession();
-      setIsAuthenticated(false);
+      setVaultKeys(null);
       setRecords([]);
     } finally {
       setAuthBusy(false);
     }
   };
 
-  const handleSyncFromFirestore = async () => {
+  const handleSyncLegacyFromFirestore = async () => {
     setSyncingCloud(true);
     setErrorMsg(null);
     setInfoMsg(null);
@@ -304,7 +332,7 @@ export function AdminConsultationsModal({ open, onClose }: AdminConsultationsMod
         await signInAdminWithGoogle();
       }
       if (!isVerifiedAdminUser(auth.currentUser)) {
-        setErrorMsg('Firestore 클라우드 동기화는 승인된 관리자 Google 계정으로만 가능합니다.');
+        setErrorMsg('과거 내역 가져오기는 승인된 관리자 Google 계정 인증이 필요합니다.');
         setSyncingCloud(false);
         return;
       }
@@ -327,10 +355,9 @@ export function AdminConsultationsModal({ open, onClose }: AdminConsultationsMod
         );
       });
 
-      const merged = await syncCloudRecordsToServer(cloudItems);
-      setRecords(merged);
-      syncDraftsFromItems(merged);
-      setInfoMsg(`클라우드 DB(${cloudItems.length}건) 동기화가 완료되었습니다.`);
+      setExtraLegacyRecords(cloudItems);
+      await syncCloudRecordsToServerOptional(cloudItems);
+      setInfoMsg(`과거 클라우드 내역 ${cloudItems.length}건을 함께 불러왔습니다.`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : '클라우드 동기화 중 오류가 발생했습니다.';
       setErrorMsg(msg);
@@ -340,12 +367,14 @@ export function AdminConsultationsModal({ open, onClose }: AdminConsultationsMod
   };
 
   const handleSaveRow = async (record: ConsultationRecord) => {
+    if (!vaultKeys) return;
     const nextStatus = draftStatus[record.id] ?? record.status;
     const nextMemo = draftMemo[record.id] ?? record.memo ?? '';
     setSavingId(record.id);
     setErrorMsg(null);
     try {
-      await updateServerConsultation(record.id, nextStatus, nextMemo);
+      await writeVaultConsultationEvent(vaultKeys, record.id, 'update', nextStatus, nextMemo);
+      await updateServerConsultationOptional(record.id, nextStatus, nextMemo);
       if (isVerifiedAdminUser(auth.currentUser)) {
         await updateConsultationRecord(record.id, nextStatus, nextMemo).catch(() => {});
       }
@@ -369,10 +398,12 @@ export function AdminConsultationsModal({ open, onClose }: AdminConsultationsMod
   };
 
   const handleDeleteRow = async (docId: string) => {
+    if (!vaultKeys) return;
     setSavingId(docId);
     setErrorMsg(null);
     try {
-      await deleteServerConsultation(docId);
+      await writeVaultConsultationEvent(vaultKeys, docId, 'delete');
+      await deleteServerConsultationOptional(docId);
       if (isVerifiedAdminUser(auth.currentUser)) {
         await deleteConsultationRecord(docId).catch(() => {});
       }
@@ -441,12 +472,12 @@ export function AdminConsultationsModal({ open, onClose }: AdminConsultationsMod
                 </button>
                 <button
                   type="button"
-                  onClick={() => void handleSyncFromFirestore()}
+                  onClick={() => void handleSyncLegacyFromFirestore()}
                   disabled={syncingCloud}
-                  title="기존 Google Firestore에만 저장된 과거 내역이 있을 경우 불러옵니다"
+                  title="이전 버전에서 저장된 과거 내역을 추가로 불러올 때 사용합니다"
                   className="inline-flex items-center gap-1 px-3 py-2 rounded-full bg-[#13294B] hover:bg-[#1D3B6B] text-[#BDD4F2] text-xs font-bold border border-white/15 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50"
                 >
-                  <span>{syncingCloud ? '동기화 중...' : '클라우드 동기화'}</span>
+                  <span>{syncingCloud ? '불러오는 중...' : '과거 내역 동기화'}</span>
                 </button>
                 <button
                   type="button"
