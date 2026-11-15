@@ -233,9 +233,9 @@ export default function App() {
   };
 
   return (
-    <div className="bg-[#F7F9FC] text-[#0F172A] antialiased overflow-x-hidden selection:bg-[#FFD166] selection:text-[#0B192C]">
+    <div className="bg-[#F7F9FC] text-[#0F172A] antialiased overflow-x-clip pt-16 sm:pt-20 selection:bg-[#FFD166] selection:text-[#0B192C]">
       {/* 1. TopNavBar */}
-      <header className="bg-[#0B192C] sticky top-0 z-50 shadow-md border-b border-white/10">
+      <header className="bg-[#0B192C]/95 backdrop-blur-md fixed top-0 left-0 right-0 z-50 shadow-md border-b border-white/10">
         <div className="w-full max-w-7xl mx-auto px-3.5 sm:px-6 lg:px-8 h-16 sm:h-20 flex items-center justify-between gap-2 sm:gap-4">
           {/* Brand Logo */}
           <a
@@ -1552,12 +1552,20 @@ export default function App() {
       <footer className="bg-[#07111F] text-white">
         <div className="w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10 sm:py-12 flex flex-col md:flex-row justify-between items-center gap-6">
           <div className="space-y-3 text-center md:text-left max-w-3xl">
-            <div className="flex items-center justify-center md:justify-start">
+            <div className="flex flex-wrap items-center justify-center md:justify-start gap-3">
               <img
                 src="/assets/aistudio/logo_bohumplus_navy.png"
                 alt="보험플러스+ 당신의 행복을 지키는 보험"
                 className="h-10 sm:h-12 w-auto object-contain"
               />
+              <button
+                type="button"
+                onClick={() => setAdminModalOpen(true)}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-[#0F233F] border border-white/10 text-[11px] text-white/55 hover:text-[#FFD166] hover:border-[#FFD166]/40 transition-colors cursor-pointer whitespace-nowrap"
+              >
+                <Lock className="w-3 h-3" />
+                <span>관리자</span>
+              </button>
             </div>
             <p className="text-xs text-white/60 leading-relaxed">
               © 2025 단기납 자산케어 금융 프리미엄 센터. All rights reserved. 본 웹사이트는 금융소비자보호법 제19조 제1항에 따른 중요 고지사항을 준수합니다.
@@ -1580,14 +1588,6 @@ export default function App() {
             <a href="#matrix" className="text-white/60 hover:text-[#FFD166] hover:underline">
               공시실
             </a>
-            <button
-              type="button"
-              onClick={() => setAdminModalOpen(true)}
-              className="inline-flex items-center gap-1 text-white/50 hover:text-[#FFD166] transition-colors cursor-pointer"
-            >
-              <Lock className="w-3 h-3" />
-              <span>관리자</span>
-            </button>
           </div>
         </div>
       </footer>

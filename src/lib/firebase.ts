@@ -267,6 +267,29 @@ export async function submitConsultationLead(input: SubmitConsultationInput): Pr
     });
 
     await batch.commit();
+
+    // Also persist to backend store so password-only admin access works without Google OAuth
+    try {
+      await fetch('/api/consultations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: docId,
+          regCode,
+          name: clean.name,
+          phone: clean.phone,
+          birthDate: clean.birthDate,
+          gender: clean.gender,
+          region: clean.region,
+          period: clean.period,
+          monthlyAmount: clean.monthlyAmount,
+          tenYearValue: clean.tenYearValue,
+        }),
+      });
+    } catch {
+      // Keep primary Firestore write succeeded
+    }
+
     return { docId, regCode, maskedName };
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `consultations/${docId}`);

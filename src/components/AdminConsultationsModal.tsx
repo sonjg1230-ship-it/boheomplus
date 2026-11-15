@@ -1,11 +1,14 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { User } from 'firebase/auth';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   CheckCircle2,
+  Clock,
   Download,
+  Eye,
+  EyeOff,
   Lock,
   LogIn,
   LogOut,
+  RefreshCw,
   Search,
   ShieldAlert,
   ShieldCheck,
@@ -13,7 +16,6 @@ import {
   X,
 } from 'lucide-react';
 import {
-  ADMIN_EMAIL,
   ConsultationRecord,
   ConsultationStatus,
   deleteConsultationRecord,
@@ -21,11 +23,22 @@ import {
   formatKoreanDateTime,
   isVerifiedAdminUser,
   signInAdminWithGoogle,
-  signOutAdmin,
-  subscribeAuthUser,
   subscribeConsultations,
   updateConsultationRecord,
+  auth,
 } from '../lib/firebase';
+import {
+  AdminLockStatus,
+  deleteServerConsultation,
+  fetchServerConsultations,
+  getAdminLockStatus,
+  getSavedAdminToken,
+  loginAdminWithPassword,
+  logoutAdminPasswordSession,
+  syncCloudRecordsToServer,
+  updateServerConsultation,
+  verifyAdminToken,
+} from '../lib/adminAuth';
 import { formatKoreanMoney } from '../data/wealthData';
 
 interface AdminConsultationsModalProps {
@@ -50,13 +63,35 @@ function statusBadgeClass(status: ConsultationStatus): string {
   }
 }
 
+function formatCountdown(totalSeconds: number): string {
+  const safe = Math.max(0, totalSeconds);
+  const mins = Math.floor(safe / 60);
+  const secs = safe % 60;
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
 export function AdminConsultationsModal({ open, onClose }: AdminConsultationsModalProps) {
-  const [authUser, setAuthUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [authBusy, setAuthBusy] = useState(false);
+  const [syncingCloud, setSyncingCloud] = useState(false);
+
+  // Password login form state
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [lockStatus, setLockStatus] = useState<AdminLockStatus>({
+    locked: false,
+    failedAttempts: 0,
+    maxAttempts: 5,
+    remainingAttempts: 5,
+    lockedUntil: null,
+    remainingSeconds: 0,
+  });
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [infoMsg, setInfoMsg] = useState<string | null>(null);
 
   const [records, setRecords] = useState<ConsultationRecord[]>([]);
+  const [loadingRecords, setLoadingRecords] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<'전체' | ConsultationStatus>('전체');
 
@@ -67,48 +102,124 @@ export function AdminConsultationsModal({ open, onClose }: AdminConsultationsMod
   const [savedToastId, setSavedToastId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
-  useEffect(() => {
-    const unsub = subscribeAuthUser((user) => {
-      setAuthUser(user);
-      setAuthReady(true);
+  const syncDraftsFromItems = useCallback((items: ConsultationRecord[]) => {
+    setDraftStatus((prev) => {
+      const next = { ...prev };
+      for (const item of items) {
+        if (!next[item.id]) next[item.id] = item.status;
+      }
+      return next;
     });
-    return unsub;
+    setDraftMemo((prev) => {
+      const next = { ...prev };
+      for (const item of items) {
+        if (next[item.id] === undefined) next[item.id] = item.memo ?? '';
+      }
+      return next;
+    });
   }, []);
 
-  const isAdmin = isVerifiedAdminUser(authUser);
+  const loadRecords = useCallback(async () => {
+    setLoadingRecords(true);
+    try {
+      const items = await fetchServerConsultations();
+      setRecords(items);
+      syncDraftsFromItems(items);
+    } catch (err) {
+      if (err instanceof Error && err.message === 'SESSION_EXPIRED') {
+        setIsAuthenticated(false);
+        setErrorMsg('세션이 만료되었습니다. 관리자 비밀번호를 다시 입력해 주세요.');
+      } else {
+        const msg = err instanceof Error ? err.message : '데이터를 불러오지 못했습니다.';
+        setErrorMsg(msg);
+      }
+    } finally {
+      setLoadingRecords(false);
+    }
+  }, [syncDraftsFromItems]);
 
+  // Initialize session & server lockout status whenever modal opens
   useEffect(() => {
-    if (!open || !authReady || !isAdmin) {
-      setRecords([]);
+    if (!open) return;
+    let cancelled = false;
+
+    const init = async () => {
+      setAuthReady(false);
+      setErrorMsg(null);
+      setInfoMsg(null);
+
+      try {
+        const [status, tokenOk] = await Promise.all([
+          getAdminLockStatus().catch(
+            (): AdminLockStatus => ({
+              locked: false,
+              failedAttempts: 0,
+              maxAttempts: 5,
+              remainingAttempts: 5,
+              lockedUntil: null,
+              remainingSeconds: 0,
+            })
+          ),
+          getSavedAdminToken() ? verifyAdminToken() : Promise.resolve(false),
+        ]);
+        if (cancelled) return;
+        setLockStatus(status);
+        setIsAuthenticated(tokenOk);
+      } finally {
+        if (!cancelled) {
+          setAuthReady(true);
+        }
+      }
+    };
+
+    void init();
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
+  // Countdown timer when temporarily locked
+  useEffect(() => {
+    if (!open || !lockStatus.locked || lockStatus.remainingSeconds <= 0) return;
+
+    const timer = window.setInterval(() => {
+      setLockStatus((prev) => {
+        if (!prev.locked) return prev;
+        const nextSec = prev.remainingSeconds - 1;
+        if (nextSec <= 0) {
+          void getAdminLockStatus()
+            .then((fresh) => setLockStatus(fresh))
+            .catch(() => {});
+          return {
+            ...prev,
+            locked: false,
+            failedAttempts: 0,
+            remainingAttempts: prev.maxAttempts,
+            lockedUntil: null,
+            remainingSeconds: 0,
+          };
+        }
+        return { ...prev, remainingSeconds: nextSec };
+      });
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [open, lockStatus.locked, lockStatus.remainingSeconds]);
+
+  // Load records & auto-refresh when authenticated
+  useEffect(() => {
+    if (!open || !authReady || !isAuthenticated) {
+      if (!isAuthenticated) setRecords([]);
       return;
     }
 
-    setErrorMsg(null);
-    const unsub = subscribeConsultations(
-      (items) => {
-        setRecords(items);
-        setDraftStatus((prev) => {
-          const next = { ...prev };
-          for (const item of items) {
-            if (!next[item.id]) next[item.id] = item.status;
-          }
-          return next;
-        });
-        setDraftMemo((prev) => {
-          const next = { ...prev };
-          for (const item of items) {
-            if (next[item.id] === undefined) next[item.id] = item.memo ?? '';
-          }
-          return next;
-        });
-      },
-      (err) => {
-        setErrorMsg(`상담 데이터를 불러오는 중 오류가 발생했습니다: ${err.message}`);
-      }
-    );
+    void loadRecords();
+    const interval = window.setInterval(() => {
+      void loadRecords();
+    }, 15000);
 
-    return unsub;
-  }, [open, authReady, isAdmin]);
+    return () => window.clearInterval(interval);
+  }, [open, authReady, isAuthenticated, loadRecords]);
 
   const counts = useMemo(() => {
     return {
@@ -136,13 +247,35 @@ export function AdminConsultationsModal({ open, onClose }: AdminConsultationsMod
 
   if (!open) return null;
 
-  const handleGoogleLogin = async () => {
+  const handlePasswordSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (authBusy || lockStatus.locked || !password) return;
+
     setAuthBusy(true);
     setErrorMsg(null);
+    setInfoMsg(null);
+
     try {
-      await signInAdminWithGoogle();
+      const result = await loginAdminWithPassword(password);
+      setLockStatus({
+        locked: result.locked,
+        failedAttempts: result.failedAttempts,
+        maxAttempts: result.maxAttempts,
+        remainingAttempts: result.remainingAttempts,
+        lockedUntil: result.lockedUntil,
+        remainingSeconds: result.remainingSeconds,
+      });
+
+      if (result.ok) {
+        setPassword('');
+        setShowPassword(false);
+        setIsAuthenticated(true);
+      } else {
+        setPassword('');
+        setErrorMsg(result.message || '비밀번호가 올바르지 않습니다.');
+      }
     } catch (error) {
-      const msg = error instanceof Error ? error.message : '로그인 중 오류가 발생했습니다.';
+      const msg = error instanceof Error ? error.message : '로그인 확인 중 오류가 발생했습니다.';
       setErrorMsg(msg);
     } finally {
       setAuthBusy(false);
@@ -152,13 +285,57 @@ export function AdminConsultationsModal({ open, onClose }: AdminConsultationsMod
   const handleLogout = async () => {
     setAuthBusy(true);
     setErrorMsg(null);
+    setInfoMsg(null);
     try {
-      await signOutAdmin();
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : '로그아웃 중 오류가 발생했습니다.';
-      setErrorMsg(msg);
+      await logoutAdminPasswordSession();
+      setIsAuthenticated(false);
+      setRecords([]);
     } finally {
       setAuthBusy(false);
+    }
+  };
+
+  const handleSyncFromFirestore = async () => {
+    setSyncingCloud(true);
+    setErrorMsg(null);
+    setInfoMsg(null);
+    try {
+      if (!isVerifiedAdminUser(auth.currentUser)) {
+        await signInAdminWithGoogle();
+      }
+      if (!isVerifiedAdminUser(auth.currentUser)) {
+        setErrorMsg('Firestore 클라우드 동기화는 승인된 관리자 Google 계정으로만 가능합니다.');
+        setSyncingCloud(false);
+        return;
+      }
+
+      const cloudItems = await new Promise<ConsultationRecord[]>((resolve, reject) => {
+        let settled = false;
+        const unsub = subscribeConsultations(
+          (items) => {
+            if (settled) return;
+            settled = true;
+            unsub();
+            resolve(items);
+          },
+          (err) => {
+            if (settled) return;
+            settled = true;
+            unsub();
+            reject(err);
+          }
+        );
+      });
+
+      const merged = await syncCloudRecordsToServer(cloudItems);
+      setRecords(merged);
+      syncDraftsFromItems(merged);
+      setInfoMsg(`클라우드 DB(${cloudItems.length}건) 동기화가 완료되었습니다.`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '클라우드 동기화 중 오류가 발생했습니다.';
+      setErrorMsg(msg);
+    } finally {
+      setSyncingCloud(false);
     }
   };
 
@@ -168,7 +345,17 @@ export function AdminConsultationsModal({ open, onClose }: AdminConsultationsMod
     setSavingId(record.id);
     setErrorMsg(null);
     try {
-      await updateConsultationRecord(record.id, nextStatus, nextMemo);
+      await updateServerConsultation(record.id, nextStatus, nextMemo);
+      if (isVerifiedAdminUser(auth.currentUser)) {
+        await updateConsultationRecord(record.id, nextStatus, nextMemo).catch(() => {});
+      }
+      setRecords((prev) =>
+        prev.map((item) =>
+          item.id === record.id
+            ? { ...item, status: nextStatus, memo: nextMemo, updatedAt: new Date() }
+            : item
+        )
+      );
       setSavedToastId(record.id);
       setTimeout(() => {
         setSavedToastId((curr) => (curr === record.id ? null : curr));
@@ -185,7 +372,11 @@ export function AdminConsultationsModal({ open, onClose }: AdminConsultationsMod
     setSavingId(docId);
     setErrorMsg(null);
     try {
-      await deleteConsultationRecord(docId);
+      await deleteServerConsultation(docId);
+      if (isVerifiedAdminUser(auth.currentUser)) {
+        await deleteConsultationRecord(docId).catch(() => {});
+      }
+      setRecords((prev) => prev.filter((item) => item.id !== docId));
       setConfirmDeleteId(null);
     } catch (error) {
       const msg = error instanceof Error ? error.message : '삭제 중 오류가 발생했습니다.';
@@ -221,7 +412,7 @@ export function AdminConsultationsModal({ open, onClose }: AdminConsultationsMod
                   </span>
                 </div>
                 <p className="text-[11px] sm:text-xs text-[#BDD4F2] truncate">
-                  Firebase Firestore 보안 저장소 실시간 연동
+                  대표님 전용 보안 비밀번호 인증 · 5회 오류 시 자동 잠금
                 </p>
               </div>
             </div>
@@ -236,9 +427,27 @@ export function AdminConsultationsModal({ open, onClose }: AdminConsultationsMod
             </button>
           </div>
 
-          <div className="flex items-center justify-end gap-2 shrink-0">
-            {isAdmin && (
+          <div className="flex flex-wrap items-center justify-end gap-2 shrink-0">
+            {isAuthenticated && (
               <>
+                <button
+                  type="button"
+                  onClick={() => void loadRecords()}
+                  disabled={loadingRecords}
+                  className="inline-flex items-center gap-1 px-3 py-2 rounded-full bg-[#13294B] hover:bg-[#1D3B6B] text-white/90 text-xs font-bold border border-white/15 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${loadingRecords ? 'animate-spin' : ''}`} />
+                  <span className="hidden sm:inline">새로고침</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleSyncFromFirestore()}
+                  disabled={syncingCloud}
+                  title="기존 Google Firestore에만 저장된 과거 내역이 있을 경우 불러옵니다"
+                  className="inline-flex items-center gap-1 px-3 py-2 rounded-full bg-[#13294B] hover:bg-[#1D3B6B] text-[#BDD4F2] text-xs font-bold border border-white/15 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50"
+                >
+                  <span>{syncingCloud ? '동기화 중...' : '클라우드 동기화'}</span>
+                </button>
                 <button
                   type="button"
                   onClick={() => exportConsultationsToCsv(filteredRecords)}
@@ -246,16 +455,16 @@ export function AdminConsultationsModal({ open, onClose }: AdminConsultationsMod
                   className="inline-flex items-center gap-1.5 px-3 sm:px-3.5 py-2 rounded-full bg-[#F4B441] hover:bg-[#D99B26] disabled:opacity-40 text-[#0B192C] text-xs font-bold transition-colors cursor-pointer whitespace-nowrap"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  <span>엑셀(CSV) 다운로드</span>
+                  <span>엑셀(CSV)</span>
                 </button>
                 <button
                   type="button"
-                  onClick={handleLogout}
+                  onClick={() => void handleLogout()}
                   disabled={authBusy}
                   className="inline-flex items-center gap-1.5 px-3 py-2 rounded-full bg-[#13294B] hover:bg-[#1D3B6B] text-white/90 text-xs font-bold border border-white/15 transition-colors cursor-pointer whitespace-nowrap"
                 >
                   <LogOut className="w-3.5 h-3.5" />
-                  <span>로그아웃</span>
+                  <span>잠금(로그아웃)</span>
                 </button>
               </>
             )}
@@ -285,60 +494,117 @@ export function AdminConsultationsModal({ open, onClose }: AdminConsultationsMod
             </div>
           )}
 
-          {!authReady ? (
-            <div className="py-16 text-center text-sm text-[#475569]">인증 상태를 확인 중입니다...</div>
-          ) : !authUser ? (
-            <div className="max-w-md mx-auto my-8 bg-white rounded-2xl p-7 border border-[#CBD5E1]/60 shadow-lg text-center space-y-5">
-              <div className="w-14 h-14 rounded-2xl bg-[#0B192C] text-[#FFD166] flex items-center justify-center mx-auto shadow-md">
-                <Lock className="w-7 h-7" />
-              </div>
-              <div className="space-y-1.5">
-                <h3 className="text-lg font-extrabold text-[#0F172A]">관리자 본인 인증이 필요합니다</h3>
-                <p className="text-xs text-[#475569] leading-relaxed">
-                  고객 연락처 및 생년월일 등 개인정보는 보안 규칙에 의해 승인된 관리자 계정(
-                  <span className="font-mono font-bold text-[#0B192C]">{ADMIN_EMAIL}</span>)만 열람할 수 있습니다.
-                </p>
-              </div>
+          {infoMsg && (
+            <div className="bg-[#DCFCE7] border border-[#86EFAC] text-[#166534] px-4 py-3 rounded-xl text-xs font-semibold flex items-center justify-between gap-3">
+              <span>{infoMsg}</span>
               <button
                 type="button"
-                onClick={handleGoogleLogin}
-                disabled={authBusy}
-                className="w-full py-3.5 px-5 rounded-full bg-[#0B192C] hover:bg-[#13294B] text-white text-sm font-bold flex items-center justify-center gap-2 shadow-md transition-colors cursor-pointer disabled:opacity-60"
+                onClick={() => setInfoMsg(null)}
+                className="text-[#166534] hover:underline shrink-0 cursor-pointer"
               >
-                <LogIn className="w-4 h-4 text-[#FFD166]" />
-                <span>{authBusy ? '로그인 확인 중...' : 'Google 관리자 계정으로 로그인'}</span>
+                닫기
               </button>
             </div>
-          ) : !isAdmin ? (
-            <div className="max-w-md mx-auto my-8 bg-white rounded-2xl p-7 border border-[#DC2626]/30 shadow-lg text-center space-y-4">
-              <div className="w-14 h-14 rounded-2xl bg-[#FEE2E2] text-[#DC2626] flex items-center justify-center mx-auto">
-                <ShieldAlert className="w-7 h-7" />
-              </div>
-              <div className="space-y-1.5">
-                <h3 className="text-lg font-extrabold text-[#0F172A]">접근 권한이 없는 계정입니다</h3>
-                <p className="text-xs text-[#475569] leading-relaxed">
-                  현재 로그인된 계정(<span className="font-mono font-semibold">{authUser.email}</span>)은 관리자 권한이 없습니다.{' '}
-                  <span className="font-mono font-bold text-[#0B192C]">{ADMIN_EMAIL}</span> 계정으로 다시 로그인해 주세요.
-                </p>
-              </div>
-              <div className="flex items-center justify-center gap-2.5 pt-2">
-                <button
-                  type="button"
-                  onClick={handleLogout}
-                  disabled={authBusy}
-                  className="px-4 py-2.5 rounded-full border border-[#CBD5E1] bg-white hover:bg-[#EEF3FA] text-xs font-bold text-[#0F172A] cursor-pointer"
+          )}
+
+          {!authReady ? (
+            <div className="py-16 text-center text-sm text-[#475569]">보안 인증 상태를 확인 중입니다...</div>
+          ) : !isAuthenticated ? (
+            <div className="max-w-md mx-auto my-6 sm:my-10 bg-white rounded-2xl p-6 sm:p-8 border border-[#CBD5E1]/60 shadow-lg space-y-5">
+              <div className="text-center space-y-3">
+                <div
+                  className={`w-14 h-14 rounded-2xl flex items-center justify-center mx-auto shadow-md ${
+                    lockStatus.locked
+                      ? 'bg-[#FEE2E2] text-[#DC2626]'
+                      : 'bg-[#0B192C] text-[#FFD166]'
+                  }`}
                 >
-                  로그아웃
-                </button>
-                <button
-                  type="button"
-                  onClick={handleGoogleLogin}
-                  disabled={authBusy}
-                  className="px-5 py-2.5 rounded-full bg-[#0B192C] hover:bg-[#13294B] text-white text-xs font-bold cursor-pointer"
-                >
-                  관리자 계정 전환
-                </button>
+                  {lockStatus.locked ? (
+                    <ShieldAlert className="w-7 h-7" />
+                  ) : (
+                    <Lock className="w-7 h-7" />
+                  )}
+                </div>
+                <div className="space-y-1">
+                  <h3 className="text-lg font-extrabold text-[#0F172A]">
+                    {lockStatus.locked ? '보안 일시 잠금 상태입니다' : '관리자 비밀번호 인증'}
+                  </h3>
+                  <p className="text-xs text-[#475569] leading-relaxed">
+                    {lockStatus.locked
+                      ? '비밀번호 5회 이상 연속 오류로 인해 개인정보 보호를 위해 접속이 일시 차단되었습니다.'
+                      : 'Google 계정 로그인 없이 설정하신 관리자 전용 비밀번호만으로 상담 신청 내역을 열람할 수 있습니다.'}
+                  </p>
+                </div>
               </div>
+
+              {lockStatus.locked ? (
+                <div className="bg-[#FEF2F2] border border-[#FECACA] rounded-2xl p-4 text-center space-y-2">
+                  <div className="inline-flex items-center gap-1.5 text-xs font-bold text-[#991B1B]">
+                    <Clock className="w-4 h-4" />
+                    <span>잠금 해제까지 남은 시간</span>
+                  </div>
+                  <div className="text-3xl font-extrabold font-mono text-[#DC2626] tabular-nums">
+                    {formatCountdown(lockStatus.remainingSeconds)}
+                  </div>
+                  <p className="text-[11px] text-[#7F1D1D]">
+                    남은 시간이 지나면 자동으로 잠금이 해제되어 다시 입력할 수 있습니다.
+                  </p>
+                </div>
+              ) : (
+                <form onSubmit={handlePasswordSubmit} className="space-y-4">
+                  <div>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label htmlFor="admin-pw-input" className="text-xs font-bold text-[#0F172A]">
+                        관리자 비밀번호
+                      </label>
+                      {lockStatus.failedAttempts > 0 && (
+                        <span className="text-[11px] font-bold text-[#DC2626] tabular-nums">
+                          오류 {lockStatus.failedAttempts}/{lockStatus.maxAttempts}회 (남은 시도{' '}
+                          {lockStatus.remainingAttempts}회)
+                        </span>
+                      )}
+                    </div>
+                    <div className="relative">
+                      <input
+                        id="admin-pw-input"
+                        type={showPassword ? 'text' : 'password'}
+                        required
+                        autoFocus
+                        autoComplete="current-password"
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        placeholder="관리자 비밀번호를 입력하세요"
+                        className="w-full pl-4 pr-11 py-3.5 rounded-xl border border-[#CBD5E1] focus:border-[#0B192C] focus:outline-none text-sm bg-[#F7F9FC] focus:bg-white font-mono"
+                      />
+                      <button
+                        type="button"
+                        aria-label={showPassword ? '비밀번호 숨기기' : '비밀번호 보기'}
+                        onClick={() => setShowPassword((v) => !v)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-[#64748B] hover:text-[#0B192C] p-1 cursor-pointer"
+                      >
+                        {showPassword ? (
+                          <EyeOff className="w-4 h-4" />
+                        ) : (
+                          <Eye className="w-4 h-4" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={authBusy || !password}
+                    className="w-full py-3.5 px-5 rounded-full bg-[#0B192C] hover:bg-[#13294B] text-white text-sm font-bold flex items-center justify-center gap-2 shadow-md transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    <LogIn className="w-4 h-4 text-[#FFD166]" />
+                    <span>{authBusy ? '비밀번호 확인 중...' : '관리자 로그인'}</span>
+                  </button>
+
+                  <p className="text-center text-[11px] text-[#64748B]">
+                    보안을 위해 5회 연속 비밀번호 오류 시 5분간 일시 잠금이 적용됩니다.
+                  </p>
+                </form>
+              )}
             </div>
           ) : (
             <>
@@ -494,7 +760,7 @@ export function AdminConsultationsModal({ open, onClose }: AdminConsultationsMod
                               <button
                                 type="button"
                                 disabled={isSaving}
-                                onClick={() => handleSaveRow(rec)}
+                                onClick={() => void handleSaveRow(rec)}
                                 className="px-3 py-2 rounded-lg bg-[#0B192C] hover:bg-[#13294B] text-white font-bold whitespace-nowrap cursor-pointer disabled:opacity-50"
                               >
                                 {isSaving ? '저장 중' : '저장'}
@@ -513,7 +779,7 @@ export function AdminConsultationsModal({ open, onClose }: AdminConsultationsMod
                                   <button
                                     type="button"
                                     disabled={isSaving}
-                                    onClick={() => handleDeleteRow(rec.id)}
+                                    onClick={() => void handleDeleteRow(rec.id)}
                                     className="px-2 py-2 rounded-lg bg-[#DC2626] text-white font-bold whitespace-nowrap cursor-pointer"
                                   >
                                     확인
@@ -543,151 +809,151 @@ export function AdminConsultationsModal({ open, onClose }: AdminConsultationsMod
                     {/* Desktop Table View */}
                     <div className="hidden md:block overflow-x-auto">
                       <table className="w-full text-left border-collapse text-xs">
-                      <thead>
-                        <tr className="bg-[#0B192C] text-white font-bold">
-                          <th className="py-3 px-4 whitespace-nowrap">접수일시 / 번호</th>
-                          <th className="py-3 px-4 whitespace-nowrap">고객 정보</th>
-                          <th className="py-3 px-4 whitespace-nowrap">연락처</th>
-                          <th className="py-3 px-4 whitespace-nowrap">신청 플랜 / 10년 환급</th>
-                          <th className="py-3 px-4 whitespace-nowrap">진행 상태</th>
-                          <th className="py-3 px-4 whitespace-nowrap">상담 메모 &amp; 관리</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-[#CBD5E1]/40">
-                        {filteredRecords.map((rec) => {
-                          const currentStatus = draftStatus[rec.id] ?? rec.status;
-                          const currentMemo = draftMemo[rec.id] ?? rec.memo ?? '';
-                          const isSaving = savingId === rec.id;
-                          const isSaved = savedToastId === rec.id;
-                          const isConfirmingDelete = confirmDeleteId === rec.id;
+                        <thead>
+                          <tr className="bg-[#0B192C] text-white font-bold">
+                            <th className="py-3 px-4 whitespace-nowrap">접수일시 / 번호</th>
+                            <th className="py-3 px-4 whitespace-nowrap">고객 정보</th>
+                            <th className="py-3 px-4 whitespace-nowrap">연락처</th>
+                            <th className="py-3 px-4 whitespace-nowrap">신청 플랜 / 10년 환급</th>
+                            <th className="py-3 px-4 whitespace-nowrap">진행 상태</th>
+                            <th className="py-3 px-4 whitespace-nowrap">상담 메모 &amp; 관리</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-[#CBD5E1]/40">
+                          {filteredRecords.map((rec) => {
+                            const currentStatus = draftStatus[rec.id] ?? rec.status;
+                            const currentMemo = draftMemo[rec.id] ?? rec.memo ?? '';
+                            const isSaving = savingId === rec.id;
+                            const isSaved = savedToastId === rec.id;
+                            const isConfirmingDelete = confirmDeleteId === rec.id;
 
-                          return (
-                            <tr key={rec.id} className="hover:bg-[#F7F9FC] align-top">
-                              <td className="py-3.5 px-4 whitespace-nowrap">
-                                <div className="font-semibold text-[#0F172A] tabular-nums">
-                                  {formatKoreanDateTime(rec.createdAt)}
-                                </div>
-                                <div className="text-[11px] font-mono text-[#64748B] mt-0.5">
-                                  {rec.regCode}
-                                </div>
-                              </td>
+                            return (
+                              <tr key={rec.id} className="hover:bg-[#F7F9FC] align-top">
+                                <td className="py-3.5 px-4 whitespace-nowrap">
+                                  <div className="font-semibold text-[#0F172A] tabular-nums">
+                                    {formatKoreanDateTime(rec.createdAt)}
+                                  </div>
+                                  <div className="text-[11px] font-mono text-[#64748B] mt-0.5">
+                                    {rec.regCode}
+                                  </div>
+                                </td>
 
-                              <td className="py-3.5 px-4 whitespace-nowrap">
-                                <div className="font-bold text-[#0F172A] text-sm">
-                                  {rec.name}{' '}
-                                  <span className="text-[11px] font-normal text-[#475569]">
-                                    ({rec.gender === 'male' ? '남' : '여'} · {rec.birthDate})
-                                  </span>
-                                </div>
-                                <div className="text-[11px] text-[#475569] mt-0.5">{rec.region}</div>
-                              </td>
+                                <td className="py-3.5 px-4 whitespace-nowrap">
+                                  <div className="font-bold text-[#0F172A] text-sm">
+                                    {rec.name}{' '}
+                                    <span className="text-[11px] font-normal text-[#475569]">
+                                      ({rec.gender === 'male' ? '남' : '여'} · {rec.birthDate})
+                                    </span>
+                                  </div>
+                                  <div className="text-[11px] text-[#475569] mt-0.5">{rec.region}</div>
+                                </td>
 
-                              <td className="py-3.5 px-4 whitespace-nowrap">
-                                <a
-                                  href={`tel:${rec.phone.replace(/[^0-9]/g, '')}`}
-                                  className="font-mono font-bold text-[#0B192C] hover:underline"
-                                >
-                                  {rec.phone}
-                                </a>
-                              </td>
+                                <td className="py-3.5 px-4 whitespace-nowrap">
+                                  <a
+                                    href={`tel:${rec.phone.replace(/[^0-9]/g, '')}`}
+                                    className="font-mono font-bold text-[#0B192C] hover:underline"
+                                  >
+                                    {rec.phone}
+                                  </a>
+                                </td>
 
-                              <td className="py-3.5 px-4 whitespace-nowrap tabular-nums">
-                                <div className="font-bold text-[#0F172A]">
-                                  {rec.period}년납 · 월 {rec.monthlyAmount}만원
-                                </div>
-                                <div className="text-[11px] font-semibold text-[#925800] mt-0.5">
-                                  10년 예상 {formatKoreanMoney(rec.tenYearValue)}
-                                </div>
-                              </td>
+                                <td className="py-3.5 px-4 whitespace-nowrap tabular-nums">
+                                  <div className="font-bold text-[#0F172A]">
+                                    {rec.period}년납 · 월 {rec.monthlyAmount}만원
+                                  </div>
+                                  <div className="text-[11px] font-semibold text-[#925800] mt-0.5">
+                                    10년 예상 {formatKoreanMoney(rec.tenYearValue)}
+                                  </div>
+                                </td>
 
-                              <td className="py-3.5 px-4 whitespace-nowrap">
-                                <select
-                                  aria-label={`${rec.name} 진행상태`}
-                                  value={currentStatus}
-                                  onChange={(e) =>
-                                    setDraftStatus((prev) => ({
-                                      ...prev,
-                                      [rec.id]: e.target.value as ConsultationStatus,
-                                    }))
-                                  }
-                                  className={`px-2.5 py-1.5 rounded-lg border text-xs font-bold focus:outline-none cursor-pointer ${statusBadgeClass(
-                                    currentStatus
-                                  )}`}
-                                >
-                                  {STATUS_OPTIONS.map((opt) => (
-                                    <option key={opt} value={opt}>
-                                      {opt}
-                                    </option>
-                                  ))}
-                                </select>
-                              </td>
-
-                              <td className="py-3.5 px-4 min-w-[260px]">
-                                <div className="flex items-center gap-1.5">
-                                  <input
-                                    type="text"
-                                    maxLength={300}
-                                    value={currentMemo}
+                                <td className="py-3.5 px-4 whitespace-nowrap">
+                                  <select
+                                    aria-label={`${rec.name} 진행상태`}
+                                    value={currentStatus}
                                     onChange={(e) =>
-                                      setDraftMemo((prev) => ({
+                                      setDraftStatus((prev) => ({
                                         ...prev,
-                                        [rec.id]: e.target.value,
+                                        [rec.id]: e.target.value as ConsultationStatus,
                                       }))
                                     }
-                                    placeholder="상담 메모 입력 (최대 300자)"
-                                    className="flex-1 px-2.5 py-1.5 rounded-lg border border-[#CBD5E1] text-xs bg-white focus:border-[#0B192C] focus:outline-none"
-                                  />
-                                  <button
-                                    type="button"
-                                    disabled={isSaving}
-                                    onClick={() => handleSaveRow(rec)}
-                                    className="px-3 py-1.5 rounded-lg bg-[#0B192C] hover:bg-[#13294B] text-white font-bold whitespace-nowrap cursor-pointer disabled:opacity-50"
+                                    className={`px-2.5 py-1.5 rounded-lg border text-xs font-bold focus:outline-none cursor-pointer ${statusBadgeClass(
+                                      currentStatus
+                                    )}`}
                                   >
-                                    {isSaving ? '저장 중' : '저장'}
-                                  </button>
+                                    {STATUS_OPTIONS.map((opt) => (
+                                      <option key={opt} value={opt}>
+                                        {opt}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </td>
 
-                                  {!isConfirmingDelete ? (
+                                <td className="py-3.5 px-4 min-w-[260px]">
+                                  <div className="flex items-center gap-1.5">
+                                    <input
+                                      type="text"
+                                      maxLength={300}
+                                      value={currentMemo}
+                                      onChange={(e) =>
+                                        setDraftMemo((prev) => ({
+                                          ...prev,
+                                          [rec.id]: e.target.value,
+                                        }))
+                                      }
+                                      placeholder="상담 메모 입력 (최대 300자)"
+                                      className="flex-1 px-2.5 py-1.5 rounded-lg border border-[#CBD5E1] text-xs bg-white focus:border-[#0B192C] focus:outline-none"
+                                    />
                                     <button
                                       type="button"
-                                      aria-label="삭제"
-                                      onClick={() => setConfirmDeleteId(rec.id)}
-                                      className="p-1.5 rounded-lg border border-[#CBD5E1] text-[#64748B] hover:text-[#DC2626] hover:border-[#DC2626]/40 cursor-pointer"
+                                      disabled={isSaving}
+                                      onClick={() => void handleSaveRow(rec)}
+                                      className="px-3 py-1.5 rounded-lg bg-[#0B192C] hover:bg-[#13294B] text-white font-bold whitespace-nowrap cursor-pointer disabled:opacity-50"
                                     >
-                                      <Trash2 className="w-3.5 h-3.5" />
+                                      {isSaving ? '저장 중' : '저장'}
                                     </button>
-                                  ) : (
-                                    <div className="flex items-center gap-1">
+
+                                    {!isConfirmingDelete ? (
                                       <button
                                         type="button"
-                                        disabled={isSaving}
-                                        onClick={() => handleDeleteRow(rec.id)}
-                                        className="px-2 py-1.5 rounded-lg bg-[#DC2626] text-white font-bold whitespace-nowrap cursor-pointer"
+                                        aria-label="삭제"
+                                        onClick={() => setConfirmDeleteId(rec.id)}
+                                        className="p-1.5 rounded-lg border border-[#CBD5E1] text-[#64748B] hover:text-[#DC2626] hover:border-[#DC2626]/40 cursor-pointer"
                                       >
-                                        삭제확인
+                                        <Trash2 className="w-3.5 h-3.5" />
                                       </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => setConfirmDeleteId(null)}
-                                        className="px-2 py-1.5 rounded-lg bg-[#E2E8F0] text-[#475569] font-bold whitespace-nowrap cursor-pointer"
-                                      >
-                                        취소
-                                      </button>
-                                    </div>
+                                    ) : (
+                                      <div className="flex items-center gap-1">
+                                        <button
+                                          type="button"
+                                          disabled={isSaving}
+                                          onClick={() => void handleDeleteRow(rec.id)}
+                                          className="px-2 py-1.5 rounded-lg bg-[#DC2626] text-white font-bold whitespace-nowrap cursor-pointer"
+                                        >
+                                          삭제확인
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => setConfirmDeleteId(null)}
+                                          className="px-2 py-1.5 rounded-lg bg-[#E2E8F0] text-[#475569] font-bold whitespace-nowrap cursor-pointer"
+                                        >
+                                          취소
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
+                                  {isSaved && (
+                                    <span className="inline-flex items-center gap-1 text-[11px] text-[#166534] font-semibold mt-1">
+                                      <CheckCircle2 className="w-3 h-3" />
+                                      <span>저장되었습니다</span>
+                                    </span>
                                   )}
-                                </div>
-                                {isSaved && (
-                                  <span className="inline-flex items-center gap-1 text-[11px] text-[#166534] font-semibold mt-1">
-                                    <CheckCircle2 className="w-3 h-3" />
-                                    <span>저장되었습니다</span>
-                                  </span>
-                                )}
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
                   </>
                 )}
               </div>
