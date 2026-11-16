@@ -6,7 +6,6 @@ import {
   Check,
   CheckCircle2,
   Clock,
-  Download,
   History,
   Info,
   Landmark,
@@ -20,7 +19,6 @@ import {
   Smartphone,
   Sparkles,
   Star,
-  Table2,
   TrendingUp,
   UserCheck,
   X,
@@ -35,9 +33,7 @@ import {
   TaxRateOption,
   buildYearlyCurve,
   calculatePlanProjection,
-  exportMatrixToCsv,
   formatKoreanMoney,
-  getMatrixRows,
 } from './data/wealthData';
 import { SurrenderCurveChart } from './components/SurrenderCurveChart';
 import { RetirementReadinessSection } from './components/RetirementReadinessSection';
@@ -122,13 +118,6 @@ export default function App() {
     () => calculatePlanProjection(selectedPeriod, selectedAmount, taxRate),
     [selectedPeriod, selectedAmount, taxRate]
   );
-
-  const matrixRows = useMemo(() => {
-    // 원본 시안 매트릭스 (10, 30, 50, 100, 200) + 150만원 포함 전체 구간 지원
-    return getMatrixRows(selectedPeriod).filter((r) =>
-      [10, 30, 50, 100, 200].includes(r.amount)
-    );
-  }, [selectedPeriod]);
 
   const curveData = useMemo(() => buildYearlyCurve(selectedAmount), [selectedAmount]);
 
@@ -264,12 +253,6 @@ export default function App() {
               환급률 시뮬레이터
             </a>
             <a
-              href="#matrix"
-              className="text-white/80 hover:text-[#FFD166] hover:opacity-100 pb-1 transition-colors whitespace-nowrap shrink-0"
-            >
-              환급 매트릭스
-            </a>
-            <a
               href="#retirement"
               className="text-white/80 hover:text-[#FFD166] hover:opacity-100 pb-1 transition-colors whitespace-nowrap shrink-0"
             >
@@ -327,10 +310,10 @@ export default function App() {
             {[
               { href: '#solution', label: '솔루션 안내' },
               { href: '#simulator', label: '시뮬레이터' },
-              { href: '#matrix', label: '환급 매트릭스' },
               { href: '#retirement', label: '은퇴 준비도' },
               { href: '#comparison', label: '상품 비교' },
               { href: '#reviews', label: '고객 후기' },
+              { href: '#contact', label: '무료 상담' },
             ].map((item) => (
               <a
                 key={item.href}
@@ -833,220 +816,7 @@ export default function App() {
         </div>
       </section>
 
-      {/* 5. Detailed Cash Surrender Value Matrix Table */}
-      <section className="py-16 sm:py-20 lg:py-24 bg-[#F7F9FC]" id="matrix">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="text-center max-w-3xl mx-auto mb-8 sm:mb-10 space-y-3">
-            <span className="text-[#925800] text-xs sm:text-sm font-bold uppercase tracking-wider block">
-              PREMIUM MATRIX
-            </span>
-            <h2 className="text-2xl sm:text-[36px] lg:text-[40px] font-extrabold text-[#0F172A] tracking-tight">
-              금액 구간별 상세 환급 비교 매트릭스
-            </h2>
-            <p className="text-sm sm:text-base text-[#475569]">
-              {selectedPeriod === 5
-                ? '5년 집중 납입 기준 각 납입액 구간별 완납 시점(99.5%)과 10년 경과 시점(120.4%)의 환급금 및 비과세 절세액을 투명하게 공개합니다.'
-                : '7년 집중 납입 기준 각 납입액 구간별 완납 시점(100.0%)과 10년 경과 시점(122.5%)의 환급금 및 비과세 절세액을 투명하게 공개합니다.'}
-            </p>
-          </div>
-
-          {/* Plan Synchronizer Switcher Header */}
-          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 mb-6 bg-white p-4 rounded-2xl border border-[#CBD5E1]/40 shadow-sm">
-            <div className="flex items-center gap-3">
-              <Table2 className="w-6 h-6 text-[#925800] shrink-0" />
-              <div>
-                <span className="text-[11px] font-bold text-[#475569] block">현재 선택 플랜</span>
-                <span className="text-sm sm:text-lg font-extrabold text-[#0B192C]">
-                  {selectedPeriod === 5
-                    ? '5년 집중납입 플랜 (10년 환급률 120.4%)'
-                    : '7년 집중납입 플랜 (10년 환급률 122.5%)'}
-                </span>
-              </div>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2">
-              <div className="flex items-center gap-1.5 p-1.5 bg-[#EEF3FA] rounded-xl border border-[#CBD5E1]/50">
-                <button
-                  type="button"
-                  onClick={() => syncPeriod(5)}
-                  className={`py-2 px-3 sm:px-4 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
-                    selectedPeriod === 5
-                      ? 'bg-[#0B192C] text-white shadow-sm'
-                      : 'text-[#475569] hover:text-[#0B192C]'
-                  }`}
-                >
-                  {selectedPeriod === 5 && <CheckCircle2 className="w-4 h-4 text-[#FFD166]" />}
-                  <span>5년납 플랜 보기</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => syncPeriod(7)}
-                  className={`py-2 px-3 sm:px-4 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
-                    selectedPeriod === 7
-                      ? 'bg-[#0B192C] text-white shadow-sm'
-                      : 'text-[#475569] hover:text-[#0B192C]'
-                  }`}
-                >
-                  {selectedPeriod === 7 && <CheckCircle2 className="w-4 h-4 text-[#FFD166]" />}
-                  <span>7년납 플랜 보기</span>
-                </button>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => exportMatrixToCsv(selectedPeriod)}
-                className="inline-flex items-center gap-1.5 py-2.5 px-3.5 sm:px-4 rounded-xl border border-[#0B192C]/20 bg-white hover:bg-[#EBF2FA] text-xs font-bold text-[#0B192C] transition-colors cursor-pointer whitespace-nowrap"
-              >
-                <Download className="w-3.5 h-3.5" />
-                <span>CSV 다운로드</span>
-              </button>
-            </div>
-          </div>
-
-          {/* Mobile Card List View (< md) */}
-          <div className="md:hidden space-y-3">
-            {matrixRows.map((row) => {
-              const isActiveRow = selectedAmount === row.amount;
-              return (
-                <button
-                  key={row.amount}
-                  type="button"
-                  onClick={() => syncAmount(row.amount)}
-                  className={`w-full text-left rounded-2xl p-4 border transition-all cursor-pointer tabular-nums ${
-                    row.isBest
-                      ? 'bg-white border-2 border-[#F4B441] shadow-md'
-                      : isActiveRow
-                      ? 'bg-[#EBF2FA]/70 border-2 border-[#0B192C] shadow-sm'
-                      : 'bg-white border-[#CBD5E1]/60 shadow-xs'
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-2 pb-3 border-b border-[#CBD5E1]/40">
-                    <div className="flex items-center gap-2">
-                      <span className="text-base font-extrabold text-[#0B192C]">
-                        월 {row.amount} 만원
-                      </span>
-                      {row.isBest && (
-                        <span className="px-2 py-0.5 rounded bg-[#925800] text-white text-[10px] font-bold">
-                          BEST
-                        </span>
-                      )}
-                    </div>
-                    <div className="text-right">
-                      <span className="text-[10px] font-bold text-[#475569] block">
-                        10년 확정 ({selectedPeriod === 5 ? '120.4%' : '122.5%'})
-                      </span>
-                      <span className="text-base font-extrabold text-[#0B192C]">
-                        {formatKoreanMoney(row.tenYearValue)}
-                      </span>
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-3 gap-2 pt-3 text-xs">
-                    <div>
-                      <span className="text-[10px] text-[#475569] block">총 납입원금</span>
-                      <span className="font-semibold text-[#0F172A]">
-                        {formatKoreanMoney(row.principal, true)}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-[10px] text-[#475569] block">순수 복리수익</span>
-                      <span className="font-bold text-[#925800]">
-                        +{formatKoreanMoney(row.profit10Y, true)}
-                      </span>
-                    </div>
-                    <div className="text-right">
-                      <span className="text-[10px] text-[#475569] block">비과세 절세</span>
-                      <span className="font-semibold text-[#13294B]">
-                        +{row.taxSaved154.toFixed(1)}만
-                      </span>
-                    </div>
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-
-          {/* Desktop Wide Table (md+) */}
-          <div className="hidden md:block overflow-x-auto rounded-2xl border border-[#CBD5E1]/50 shadow-lg bg-white">
-            <table className="w-full text-left border-collapse">
-              <thead>
-                <tr className="bg-[#0B192C] text-white text-xs font-bold border-b border-white/10">
-                  <th className="py-4 px-6 whitespace-nowrap">월 납입금액</th>
-                  <th className="py-4 px-6 whitespace-nowrap">
-                    총 납입 원금 ({selectedPeriod * 12}회)
-                  </th>
-                  <th className="py-4 px-6 whitespace-nowrap">
-                    {selectedPeriod}년 완납 시점 ({selectedPeriod === 5 ? '99.5%' : '100.0%'})
-                  </th>
-                  <th className="py-4 px-6 text-[#FFD166] bg-[#13294B] whitespace-nowrap">
-                    10년 시점 ({selectedPeriod === 5 ? '120.4%' : '122.5%'} 확정)
-                  </th>
-                  <th className="py-4 px-6 whitespace-nowrap">순수 복리 수익금</th>
-                  <th className="py-4 px-6 whitespace-nowrap">비과세 절세 혜택 (15.4%)</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-[#CBD5E1]/30 text-sm text-[#0F172A] tabular-nums">
-                {matrixRows.map((row) => {
-                  const isActiveRow = selectedAmount === row.amount;
-                  return (
-                    <tr
-                      key={row.amount}
-                      onClick={() => syncAmount(row.amount)}
-                      className={`cursor-pointer transition-colors ${
-                        row.isBest
-                          ? 'bg-[#F4B441]/10 font-bold'
-                          : isActiveRow
-                          ? 'bg-[#EBF2FA]/60'
-                          : 'hover:bg-[#EEF3FA]'
-                      }`}
-                    >
-                      <td className="py-4 px-6 font-bold whitespace-nowrap">
-                        <span
-                          className={`inline-flex items-center gap-1.5 ${
-                            row.isBest ? 'text-[#925800]' : ''
-                          }`}
-                        >
-                          <span>{row.amount} 만원</span>
-                          {row.isBest && (
-                            <span className="px-2 py-0.5 rounded bg-[#925800] text-white text-[11px] font-bold">
-                              BEST
-                            </span>
-                          )}
-                        </span>
-                      </td>
-                      <td className="py-4 px-6 text-[#475569] whitespace-nowrap">
-                        {formatKoreanMoney(row.principal)}
-                      </td>
-                      <td className="py-4 px-6 whitespace-nowrap">
-                        {formatKoreanMoney(row.payoffValue)}
-                      </td>
-                      <td
-                        className={`py-4 px-6 font-extrabold text-[#0B192C] whitespace-nowrap ${
-                          row.isBest ? 'bg-[#EBF2FA] text-base' : 'bg-[#EBF2FA]/40'
-                        }`}
-                      >
-                        {formatKoreanMoney(row.tenYearValue)}
-                      </td>
-                      <td className="py-4 px-6 text-[#925800] font-bold whitespace-nowrap">
-                        +{formatKoreanMoney(row.profit10Y)}
-                      </td>
-                      <td className="py-4 px-6 text-[#13294B] font-semibold whitespace-nowrap">
-                        +{row.taxSaved154.toFixed(1)} 만원 {row.isBest ? '전액 비과세' : '감면'}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-
-          <p className="text-xs text-[#475569] mt-3">
-            * 상기 예시 수치는 {selectedPeriod}년납 10년 {selectedPeriod === 5 ? '거치' : ''} 시점(
-            {selectedPeriod === 5 ? '120.4%' : '122.5%'})의 대표 생명보험사 표준 확정 환급률 기준이며, 가입 연령 및 성별에 따라 미세한 차이가 발생할 수 있습니다. (행을 클릭하면 상단 시뮬레이터에 즉시 반영됩니다.)
-          </p>
-        </div>
-      </section>
-
-      {/* 5.5 Retirement Readiness Section */}
+      {/* 5. Retirement Readiness Section */}
       <RetirementReadinessSection
         selectedPeriod={selectedPeriod}
         monthlyAmount={selectedAmount}
@@ -1585,7 +1355,7 @@ export default function App() {
             <a href="#solution" className="text-white/60 hover:text-[#FFD166] hover:underline">
               금융소비자보호기준
             </a>
-            <a href="#matrix" className="text-white/60 hover:text-[#FFD166] hover:underline">
+            <a href="#simulator" className="text-white/60 hover:text-[#FFD166] hover:underline">
               공시실
             </a>
           </div>
